@@ -5,9 +5,10 @@ leave it, so the page cannot send its own notifications. This server sends a Web
 the right time instead, and the phone's push service (for example Apple's) wakes Karamel to show
 it.
 
-> Status: step 4 of 5. Done: the foundation, the API, the push sender, and the website side
-> (see the main README, "Reminders while Karamel is closed"). Next: hosting. Nothing has been
-> sent to a real push service yet (see [Known limitations](#known-limitations)).
+> Status: step 5 of 5, hosting, in progress. Done: the foundation, the API, the push sender, the
+> website side (see the main README, "Reminders while Karamel is closed"), and everything needed
+> to deploy to Fly.io (see [Hosting on Fly.io](#hosting-on-flyio)). Nothing has been sent to a
+> real push service yet (see [Known limitations](#known-limitations)).
 
 ## What it stores
 
@@ -138,6 +139,64 @@ not an `https` URL or `mailto:` address.
 - Every endpoint is under `/api`. The website will forward `/api/*` to this server, so the browser
   only talks to the website's own origin: the CSP stays `connect-src 'self'` and no CORS is needed.
 - `TreatWarningsAsErrors`, NuGet lock files (`packages.lock.json`), and `dotnet format` in CI.
+
+## Hosting on Fly.io
+
+Chosen for being always on (the sender runs every 5 seconds, so free tiers that sleep would miss
+reminders), cheap, and managed (backups included). It runs a standard Docker image, so moving to
+another host later needs no code changes.
+
+- **Cost, about $6–7 a month** (checked November 2026): one `shared-cpu-1x` 256 MB machine
+  (≈ $2.19) and a Managed Postgres Developer cluster (`dev-256`, $4). That is over the Free plan's
+  $5 monthly allowance, and then the whole month is billed.
+- **Region:** Frankfurt (`fra`), in the EU.
+
+### The pieces
+
+- `Dockerfile`: builds with the .NET 10 SDK, runs on Microsoft's **chiseled** ASP.NET Core image
+  (no shell, no package manager, non-root user). Restores with `--locked-mode`.
+- `fly.toml`: always on (`auto_stop_machines = "off"`), HTTPS only, a health check on
+  `/api/health`, 256 MB, and the **release command** `migrate`, which updates the database in a
+  temporary machine before a new version goes live. If it fails, the deploy stops.
+- **Database URL:** Fly gives the database as `DATABASE_URL` (`postgres://user:password@host/db`).
+  The server converts it to an Npgsql connection string (`Hosting/DatabaseUrl.cs`): TLS required
+  unless the URL says otherwise, and at most 10 pooled connections, because the Developer plan
+  allows 20 and Npgsql's default is 100. `ConnectionStrings__Karamel` still wins if set.
+- **Logs:** EF Core's SQL logging is at `Warning`, so the sender's query does not fill the logs
+  every 5 seconds.
+- **CI** builds the image exactly like this, checks that it runs as a non-root user, runs
+  `migrate` twice (the second time must change nothing), and starts the server with 256 MB of
+  memory to check it stays healthy.
+
+### First deploy
+
+Needs [flyctl](https://fly.io/docs/flyctl/install/) and a Fly.io account with a card. From this
+folder:
+
+```bash
+fly auth login
+fly apps create karamel-api                                         # the name must be free on Fly.io
+fly mpg create --name karamel-db --plan dev-256 --region fra        # about $4 a month
+fly mpg attach <CLUSTER_ID> -a karamel-api                          # sets DATABASE_URL as a secret
+
+# A new production VAPID key pair, straight into Fly's secrets: never printed, never on disk,
+# and never the same as a development key.
+dotnet run --project Karamel.Api --no-launch-profile -- generate-vapid-keys | fly secrets import --stage -a karamel-api
+
+fly deploy --ha=false                                               # one machine, not two
+curl https://karamel-api.fly.dev/api/health                         # Healthy
+```
+
+Then, on Vercel: **Settings → Environment Variables →** `KARAMEL_API_URL` =
+`https://karamel-api.fly.dev` (Production and Preview), and redeploy. The website then forwards
+`/api/*` to the server and shows "Remind me when Karamel is closed".
+
+### Later
+
+- **Update:** `fly deploy --ha=false` again. The release command applies new migrations first.
+- **Logs:** `fly logs -a karamel-api`. **Releases and rollback:** `fly releases -a karamel-api`.
+- **Changing the VAPID keys** makes every phone's subscription stop working until it subscribes
+  again, so do it only if the private key leaked.
 
 ## Run it locally
 

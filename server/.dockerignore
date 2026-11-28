@@ -1,0 +1,6 @@
+# Only what the Dockerfile copies is needed; keep build output and tests out of the image.
+**/bin/
+**/obj/
+Karamel.Api.Tests/
+*.md
+fly.toml

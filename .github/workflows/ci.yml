@@ -109,3 +109,59 @@ jobs:
 
       - name: Test (against real PostgreSQL)
         run: dotnet test --no-build --configuration Release
+
+  # The server's container image, exactly as Fly.io builds it, run the way Fly.io runs it.
+  docker:
+    name: Docker image
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: karamel
+          POSTGRES_PASSWORD: karamel
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U karamel"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgres://karamel:karamel@localhost:5432/karamel?sslmode=disable
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v7
+
+      - name: Build the image
+        run: docker build --tag karamel-api server
+
+      - name: Runs as a non-root user
+        run: |
+          user=$(docker inspect --format '{{.Config.User}}' karamel-api)
+          echo "Image user: '$user'"
+          test -n "$user" && test "$user" != "root" && test "$user" != "0"
+
+      - name: Migrate, like Fly's release command (twice, the second must be a no-op)
+        run: |
+          docker run --rm --network host -e DATABASE_URL karamel-api migrate | tee first.txt
+          grep -q "Applied 1 migration" first.txt
+          docker run --rm --network host -e DATABASE_URL karamel-api migrate | grep -q "up to date"
+
+      - name: Start the server in 256 MB, like the Fly machine, and check it
+        run: |
+          # Throwaway keys for this run only; they are never printed.
+          docker run --rm karamel-api generate-vapid-keys > keys.env
+          docker run --detach --name api --network host --memory 256m --env-file keys.env -e DATABASE_URL karamel-api
+          for i in $(seq 1 30); do curl --fail --silent localhost:8080/api/health && break; sleep 1; done
+          curl --fail --silent localhost:8080/api/health | grep -qx Healthy
+          curl --fail --silent localhost:8080/api/push/public-key | grep -q publicKey
+          sleep 15  # A few sender rounds.
+          test "$(docker inspect --format '{{.State.Running}}' api)" = "true"
+          docker stats --no-stream --format 'Memory in use: {{.MemUsage}}' api
+          ! docker logs api 2>&1 | grep -E "fail:|crit:|Unhandled"
+
+      - name: Server logs
+        if: always()
+        run: docker logs api 2>&1 | tail -50 || true
