@@ -12,7 +12,7 @@ namespace Karamel.Api.Tests;
 /// The server comes from KARAMEL_TEST_POSTGRES (default: localhost:55432, user
 /// "karamel" with the CREATEDB right). CI starts one as a service container.
 /// </summary>
-public sealed class PostgresDatabase : IAsyncLifetime
+public class PostgresDatabase : IAsyncLifetime
 {
     private static readonly string Server =
         Environment.GetEnvironmentVariable("KARAMEL_TEST_POSTGRES")
@@ -27,9 +27,13 @@ public sealed class PostgresDatabase : IAsyncLifetime
         .UseSnakeCaseNamingConvention()
         .Options);
 
+    /// <summary>Whether the tables are created up front; false gives an empty database.</summary>
+    protected virtual bool Migrated => true;
+
     public async Task InitializeAsync()
     {
         await RunOnServerAsync($"CREATE DATABASE {_name}");
+        if (!Migrated) return;
         await using var db = CreateContext();
         await db.Database.MigrateAsync();
     }
@@ -48,4 +52,10 @@ public sealed class PostgresDatabase : IAsyncLifetime
         await using var command = new NpgsqlCommand(sql, connection);
         await command.ExecuteNonQueryAsync();
     }
+}
+
+/// <summary>A fresh database with no tables at all.</summary>
+public sealed class EmptyPostgresDatabase : PostgresDatabase
+{
+    protected override bool Migrated => false;
 }

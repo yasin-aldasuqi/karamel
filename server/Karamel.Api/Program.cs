@@ -1,6 +1,7 @@
 using Karamel.Api.Data;
 using Karamel.Api.Devices;
 using Karamel.Api.Health;
+using Karamel.Api.Hosting;
 using Karamel.Api.Push;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
@@ -17,10 +18,25 @@ if (args is ["generate-vapid-keys"])
 var builder = WebApplication.CreateBuilder(args);
 
 // Fail at startup, with a clear message, instead of on the first request.
-var connectionString = builder.Configuration.GetConnectionString("Karamel")
+var connectionString = DatabaseUrl.ConnectionString(builder.Configuration)
     ?? throw new InvalidOperationException(
-        "Missing the connection string 'ConnectionStrings:Karamel' " +
-        "(environment variable ConnectionStrings__Karamel).");
+        "Missing the database: set ConnectionStrings__Karamel (an Npgsql connection string) " +
+        "or DATABASE_URL (postgres://user:password@host:port/database).");
+
+// "migrate" creates or updates the tables and exits. Hosts run it before a new version goes
+// live (Fly.io's release_command), so a failed migration stops the deploy instead of
+// leaving a server running against the wrong schema.
+if (args is ["migrate"])
+{
+    var options = new DbContextOptionsBuilder<KaramelDb>().UseNpgsql(connectionString).UseSnakeCaseNamingConvention();
+    await using var db = new KaramelDb(options.Options);
+    var pending = (await db.Database.GetPendingMigrationsAsync()).ToList();
+    await db.Database.MigrateAsync();
+    Console.WriteLine(pending.Count == 0
+        ? "The database is up to date."
+        : $"Applied {pending.Count} migration(s): {string.Join(", ", pending)}");
+    return;
+}
 
 builder.Services.AddDbContext<KaramelDb>(options => options
     .UseNpgsql(connectionString)
