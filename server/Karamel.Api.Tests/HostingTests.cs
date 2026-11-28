@@ -77,7 +77,11 @@ public class MigrateCommandTests(EmptyPostgresDatabase database) : IClassFixture
     public async Task Migrate_creates_the_tables_from_a_DATABASE_URL_and_then_reports_up_to_date()
     {
         var parsed = new NpgsqlConnectionStringBuilder(database.ConnectionString);
-        var url = $"postgres://{parsed.Username}@{parsed.Host}:{parsed.Port}/{parsed.Database}?sslmode=disable";
+        // With the password when the server needs one (CI's does; a local trust setup does not).
+        var login = parsed.Password is { Length: > 0 } password
+            ? $"{Uri.EscapeDataString(parsed.Username!)}:{Uri.EscapeDataString(password)}"
+            : Uri.EscapeDataString(parsed.Username!);
+        var url = $"postgres://{login}@{parsed.Host}:{parsed.Port}/{parsed.Database}?sslmode=disable";
 
         var first = await RunServerAsync(url, "migrate");
         Assert.True(first.ExitCode == 0, first.Output);
